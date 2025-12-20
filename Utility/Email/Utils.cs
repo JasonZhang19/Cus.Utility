@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Mail;
+using System.Net.Mime;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -11,105 +12,40 @@ namespace Utility.Email
 {
     public static class Utils
     {
-        #region Method : Create Mail Message
+        #region Create Mail Message
+
         public static MailMessage ToMailMessage(Mail mail)
         {
+            if (mail == null) throw new ArgumentNullException(nameof(mail));
+
             return ToMailMessage(mail.From, mail.To, mail.Subject, mail.HtmlBody, mail.TextBody, mail.CC, mail.BCC, mail.ReplyTo, mail.Attach);
         }
 
         public static MailMessage ToMailMessage(string mailFrom, string mailTo, string mailSubject, string htmlMailBody, string textMailBody, string mailCC, string mailBCC, string mailReplyTo, string attachFiles)
         {
-            // Create the message. 
-            MailMessage mailMsg = new MailMessage();
-
-            // Assign the "from" address.
-            mailMsg.From = new MailAddress(mailFrom);
-
-            // Assign the "to" address(es).
-            string[] tos = mailTo.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (string addr in tos.Where(SafeConversion.IsEmail))
+            MailMessage mailMsg = new MailMessage
             {
-                mailMsg.To.Add(new MailAddress(addr));
-            }
+                From = new MailAddress(mailFrom),
+                Subject = mailSubject,
+                BodyEncoding = Encoding.UTF8
+            };
 
-            // Assign the "cc" address(es).
-            if (!string.IsNullOrEmpty(mailCC))
-            {
-                string[] ccs = mailCC.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (string addr in ccs.Where(SafeConversion.IsEmail))
-                {
-                    mailMsg.CC.Add(new MailAddress(addr));
-                }
-            }
+            AddAddresses(mailMsg.To, mailTo);
+            AddAddresses(mailMsg.CC, mailCC);
+            AddAddresses(mailMsg.Bcc, mailBCC);
+            AddAddresses(mailMsg.Bcc, mailBCC);
+            AddAddresses(mailMsg.ReplyToList, mailReplyTo);
 
-            // Assign the "bcc" address(es).
-            if (!string.IsNullOrEmpty(mailBCC))
-            {
-                string[] bccs = mailBCC.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (string addr in bccs.Where(SafeConversion.IsEmail))
-                {
-                    mailMsg.Bcc.Add(new MailAddress(addr));
-                }
-            }
-
-            // Assign the reply-to address.
-            if (mailReplyTo != null)
-            {
-                mailReplyTo.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).ToList().ForEach(addr =>
-                {
-                    mailMsg.ReplyToList.Add(new MailAddress(addr));
-                });
-            }
-
-            // Assign the subject line.
-            mailMsg.Subject = mailSubject;
-
-            // Assign the message body.
-            if (htmlMailBody != null && textMailBody != null)
-            {
-                // Create the Plain Text part
-                AlternateView plainView = AlternateView.CreateAlternateViewFromString(textMailBody, Encoding.UTF8, "text/plain");
-                // Create the Html part
-                AlternateView htmlView = AlternateView.CreateAlternateViewFromString(htmlMailBody, Encoding.UTF8, "text/html");
-                mailMsg.AlternateViews.Add(plainView);
-                mailMsg.AlternateViews.Add(htmlView);
-            }
-            else if (htmlMailBody != null)
-            {
-                mailMsg.Body = htmlMailBody;
-                mailMsg.IsBodyHtml = true;
-            }
-            else
-            {
-                mailMsg.Body = textMailBody;
-                // The message body type is plain text by default, so no need to set it.
-            }
-
-            // Attach files.
-            if (attachFiles != null)
-            {
-                string[] files = attachFiles.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (string filename in files)
-                {
-                    // Create the file attachment for this e-mail message.
-                    Attachment data = new Attachment(filename, System.Net.Mime.MediaTypeNames.Application.Octet);
-
-                    // Add time stamp information for the file.
-                    System.Net.Mime.ContentDisposition disposition = data.ContentDisposition;
-                    disposition.CreationDate = File.GetCreationTime(filename);
-                    disposition.ModificationDate = File.GetLastWriteTime(filename);
-                    disposition.ReadDate = File.GetLastAccessTime(filename);
-
-                    // Add the file attachment to this e-mail message.
-                    mailMsg.Attachments.Add(data);
-                }
-            }
+            SetBody(mailMsg, htmlMailBody, textMailBody);
+            AddAttachments(mailMsg, attachFiles);
 
             return mailMsg;
         }
+
         #endregion
 
-        #region Method : Send Mail
+        #region Send Mail
+
         public static SendingResult SendWithCredentials(Mail mail, Smtp server)
         {
             return SendWithCredentials(ToMailMessage(mail), server);
@@ -122,58 +58,40 @@ namespace Utility.Email
 
         public static SendingResult SendWithCredentials(MailMessage mail, Smtp server)
         {
-            ServicePointManager.ServerCertificateValidationCallback = ValidateServerCertificate;
+            if (mail == null) throw new ArgumentNullException(nameof(mail));
+            if (server == null) throw new ArgumentNullException(nameof(server));
 
-            SendingResult results = new SendingResult();
             SmtpClient client = new SmtpClient(server.RelayServer, server.RelayPort)
             {
                 EnableSsl = server.UseSSL,
-                Credentials = new NetworkCredential(server.UserName ?? "", server.Password ?? "")
+                Credentials = new NetworkCredential(server.UserName ?? string.Empty, server.Password ?? string.Empty)
             };
 
-            try
-            {
-                results.First = new SingleResult().BeginSend();
-                client.Send(mail);
-                results.First.EndSend();
-            }
-            catch (SmtpException ex)
-            {
-                results.First.EndSend(ex);
-
-                if (ex.Message.ToLower().IndexOf("operation has timed out", StringComparison.Ordinal) >= 0)
-                {
-                    try
-                    {
-                        results.TryAgain = new SingleResult().BeginSend();
-                        client.Send(mail);
-                    }
-                    catch (SmtpException ex2)
-                    {
-                        results.TryAgain.EndSend(ex2);
-                    }
-                }
-            }
-            finally
-            {
-                mail.Dispose();
-                client.Dispose();
-            }
-
-            return results;
+            return SendInternal(mail, client);
         }
 
         public static SendingResult SendWithCredentials(MailMessage mail)
         {
-            ServicePointManager.ServerCertificateValidationCallback = ValidateServerCertificate;
+            if (mail == null) throw new ArgumentNullException(nameof(mail));
 
-            SendingResult results = new SendingResult();
             SmtpClient client = new SmtpClient();
+            return SendInternal(mail, client);
+        }
+
+        #endregion
+
+        #region Internal Send Logic
+
+        private static SendingResult SendInternal(MailMessage mail, SmtpClient client)
+        {
+            SendingResult results = new SendingResult();
+
+            RemoteCertificateValidationCallback originalCallback = ServicePointManager.ServerCertificateValidationCallback;
+            ServicePointManager.ServerCertificateValidationCallback = ValidateServerCertificate;
 
             try
             {
                 results.First = new SingleResult().BeginSend();
-                mail.BodyEncoding = Encoding.UTF8;
                 client.Send(mail);
                 results.First.EndSend();
             }
@@ -181,43 +99,93 @@ namespace Utility.Email
             {
                 results.First.EndSend(ex);
 
-                if (ex.Message.ToLower().IndexOf("operation has timed out", StringComparison.Ordinal) >= 0)
+                if (IsTimeout(ex))
                 {
                     try
                     {
                         results.TryAgain = new SingleResult().BeginSend();
                         client.Send(mail);
+                        results.TryAgain.EndSend();
                     }
-                    catch (SmtpException ex2)
+                    catch (SmtpException retryEx)
                     {
-                        results.TryAgain.EndSend(ex2);
+                        results.TryAgain.EndSend(retryEx);
                     }
                 }
             }
             finally
             {
+                ServicePointManager.ServerCertificateValidationCallback = originalCallback;
                 mail.Dispose();
                 client.Dispose();
             }
 
             return results;
         }
+
+        private static bool IsTimeout(SmtpException ex)
+        {
+            return ex.StatusCode == SmtpStatusCode.GeneralFailure || ex.InnerException is TimeoutException;
+        }
+
         #endregion
 
-        #region Method : Validates the server certificate.
-        /// <summary>
-        /// Validates the server certificate.
-        /// </summary>
-        /// <param name="sender">The sender.</param>
-        /// <param name="certificate">The certificate.</param>
-        /// <param name="chain">The chain.</param>
-        /// <param name="sslPolicyErrors">The SSL policy errors.</param>
-        /// <returns><c>true</c> if XXXX, <c>false</c> otherwise</returns>
+        #region Helpers
+
+        private static void AddAddresses(MailAddressCollection collection, string addresses)
+        {
+            if (string.IsNullOrWhiteSpace(addresses)) return;
+            foreach (string addr in addresses.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(a => a.Trim()).Where(SafeConversion.IsEmail))
+            {
+                collection.Add(new MailAddress(addr));
+            }
+        }
+
+        private static void SetBody(MailMessage mailMsg, string htmlBody, string textBody)
+        {
+            if (!string.IsNullOrEmpty(htmlBody) && !string.IsNullOrEmpty(textBody))
+            {
+                mailMsg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(textBody, Encoding.UTF8, "text/plain"));
+                mailMsg.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(htmlBody, Encoding.UTF8, "text/html"));
+            }
+            else if (!string.IsNullOrEmpty(htmlBody))
+            {
+                mailMsg.Body = htmlBody;
+                mailMsg.IsBodyHtml = true;
+            }
+            else
+            {
+                mailMsg.Body = textBody ?? string.Empty;
+            }
+        }
+
+        private static void AddAttachments(MailMessage mailMsg, string attachFiles)
+        {
+            if (string.IsNullOrWhiteSpace(attachFiles)) return;
+
+            foreach (string filename in attachFiles.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(f => f.Trim()).Where(File.Exists))
+            {
+                Attachment attachment = new Attachment(filename, MediaTypeNames.Application.Octet);
+
+                ContentDisposition disposition = attachment.ContentDisposition;
+                disposition.CreationDate = File.GetCreationTime(filename);
+                disposition.ModificationDate = File.GetLastWriteTime(filename);
+                disposition.ReadDate = File.GetLastAccessTime(filename);
+
+                mailMsg.Attachments.Add(attachment);
+            }
+        }
+
+        #endregion
+
+        #region Certificate Validation (保持原行为)
+
         [System.Security.Permissions.PermissionSet(System.Security.Permissions.SecurityAction.Assert, Unrestricted = true)]
         public static bool ValidateServerCertificate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
         {
             return true;
         }
+
         #endregion
     }
 }
